@@ -1,0 +1,148 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation template to create resources required to run tasks on an ECS cluster.
+
+Mappings:
+
+  AWSRegionToAMI:
+    ap-southeast-1:
+      AMIID: ami-438b2f20
+    ap-southeast-2:
+      AMIID: ami-862211e5
+
+Parameters:
+
+  VPCStackName:
+    Description: Name of an active CloudFormation stack that contains the ecs resources,
+      such as the subnet and security group, that will be used in this stack.
+    Type: String
+    MinLength: 1
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z][-a-zA-Z0-9]*$"
+    Default: EcsClusterStack
+
+  SpringBootInstanceType:
+    Type: String
+    Description: ECS EC2 instance type
+    Default: t2.micro
+    AllowedValues:
+    - t2.nano
+    - t2.micro
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  SpringBootAsgMaxSize:
+    Type: Number
+    Description: Maximum size and initial Desired Capacity of ECS Auto Scaling Group
+    Default: '1'
+
+  SpringBootPort:
+    Type: String
+    Description: Optional - Security Group port to open on ECS instances - defaults
+      to port 80
+    Default: '80'
+  SpringBootCluster:
+    Type: String
+    Description: ECS Cluster Name
+    Default: SpringBootCluster
+  SourceCidr:
+    Type: String
+    Description: Optional - CIDR/IP range for EcsPort - defaults to 0.0.0.0/0
+    Default: 0.0.0.0/0
+
+Resources:
+  SpringBootClusterResource:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName:
+        Ref: SpringBootCluster
+  SpringBootSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Allowed Ports
+      VpcId:
+        Fn::ImportValue: 
+            Fn::Sub: "${VPCStackName}-VPCID"
+
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort:
+          Ref: SpringBootPort
+        ToPort:
+          Ref: SpringBootPort
+        CidrIp:
+          Ref: SourceCidr
+  SpringBootInstancePolicy:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+  EcsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles:
+      - Ref: SpringBootInstancePolicy
+
+  SpringBootInstance:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId:
+        Fn::FindInMap:
+        - AWSRegionToAMI
+        - Ref: AWS::Region
+        - AMIID
+      InstanceType:
+        Ref: SpringBootInstanceType
+      AssociatePublicIpAddress: true
+      IamInstanceProfile:
+        Ref: EcsInstanceProfile
+      KeyName:
+        Fn::ImportValue:
+          Fn::Sub: "${VPCStackName}-KeyName"
+      SecurityGroups:
+        - Ref: SpringBootSecurityGroup
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash\n"
+            - echo ECS_CLUSTER=
+            - Ref: SpringBootCluster
+            - " >> /etc/ecs/ecs.config\n"
+
+  SpringBootASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - Fn::Join:
+            - ","
+            - - Fn::ImportValue:
+                    Fn::Sub:  "${VPCStackName}-SubnetA"
+              - Fn::ImportValue:
+                    Fn::Sub:  "${VPCStackName}-SubnetB"
+
+      LaunchConfigurationName:
+        Ref: SpringBootInstance
+      MinSize: '1'
+      MaxSize:
+        Ref: SpringBootAsgMaxSize
+      DesiredCapacity:
+        Ref: SpringBootAsgMaxSize
+      Tags:
+      - Key: Name
+        Value:
+          Fn::Join:
+          - ''
+          - - 'ECS Instance - '
+            - Ref: AWS::StackName
+        PropagateAtLaunch: 'true'
